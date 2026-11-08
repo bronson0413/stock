@@ -3,5 +3,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 data/cache/
-reports/*
-!reports/synthetic/
+reports/out/
+reports/ci/
