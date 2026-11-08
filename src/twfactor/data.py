@@ -31,18 +31,19 @@ PRICE_LIMIT = 0.10
 class Panel:
     """Wide (date x stock) market data.
 
-    ret     daily return used for P&L. For real data this is computed from the
-            exchange's reference price (see `returns_from_spread`), so ex-dividend
-            gaps are not counted as losses.
+    ret     daily return used for P&L. For real data, corporate-action days are
+            priced off the exchange reference price (see `build_returns`).
     close   raw close price (used for the minimum-price filter).
     value   traded value in NTD (used for the liquidity filter and Amihud).
     true_signal  synthetic data only: the planted predictive signal.
+    industry     optional stock_id -> industry label, for industry neutralisation.
     """
 
     ret: pd.DataFrame
     close: pd.DataFrame
     value: pd.DataFrame
     true_signal: pd.DataFrame | None = None
+    industry: pd.Series | None = None
 
     def __post_init__(self) -> None:
         for name in ("close", "value"):
@@ -53,7 +54,7 @@ class Panel:
     def truncate(self, end) -> "Panel":
         """Return a copy containing data up to and including `end`."""
         sig = None if self.true_signal is None else self.true_signal.loc[:end]
-        return Panel(self.ret.loc[:end], self.close.loc[:end], self.value.loc[:end], sig)
+        return Panel(self.ret.loc[:end], self.close.loc[:end], self.value.loc[:end], sig, self.industry)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +120,10 @@ def make_synthetic(
     value = np.where(alive, shares_traded * close, np.nan)
 
     mk = lambda a: pd.DataFrame(a, index=dates, columns=ids)
-    return Panel(mk(ret), mk(close), mk(value), mk(np.where(alive, z, np.nan)))
+    # Separate RNG so adding labels does not change any of the draws above.
+    labels = np.random.default_rng(seed + 10_000).integers(0, 10, n_stocks)
+    industry = pd.Series([f"IND{k}" for k in labels], index=ids)
+    return Panel(mk(ret), mk(close), mk(value), mk(np.where(alive, z, np.nan)), industry)
 
 
 
@@ -307,14 +311,18 @@ def stock_universe(client: FinMindClient, start: str) -> pd.DataFrame:
       (TaiwanStockDelisting). Including the delisted ones is what removes
     survivorship bias: companies that went bust are in the sample.
 
-    Returns columns stock_id, stock_name, status (listed/delisted), delist_date.
+    Returns columns stock_id, stock_name, industry_category, status
+    (listed/delisted), delist_date. industry_category is today's
+    classification (FinMind has no history of it), and unknown for delisted
+    stocks.
     """
     info = client.get("TaiwanStockInfo")
     info["stock_id"] = info["stock_id"].astype(str)
     info = info[info["type"].isin(["twse", "tpex"]) & info["stock_id"].str.fullmatch(r"[1-9]\d{3}")]
     bad = info.groupby("stock_id")["industry_category"].agg(lambda s: bool(set(s) & _EXCLUDED_CATEGORIES))
     info = info[~info["stock_id"].map(bad)]
-    listed = info.drop_duplicates("stock_id")[["stock_id", "stock_name"]].assign(status="listed", delist_date=pd.NaT)
+    listed = info.drop_duplicates("stock_id")[["stock_id", "stock_name", "industry_category"]]
+    listed = listed.assign(status="listed", delist_date=pd.NaT)
 
     dl = client.get("TaiwanStockDelisting")
     dl["stock_id"] = dl["stock_id"].astype(str)
@@ -325,12 +333,14 @@ def stock_universe(client: FinMindClient, start: str) -> pd.DataFrame:
     delisted = dl.sort_values("date").drop_duplicates("stock_id", keep="last")
     delisted = delisted.rename(columns={"date": "delist_date"})[["stock_id", "stock_name", "delist_date"]]
     delisted["status"] = "delisted"
+    delisted["industry_category"] = "(delisted, unknown)"
     return pd.concat([listed, delisted], ignore_index=True).sort_values("stock_id").reset_index(drop=True)
 
 
 def load_finmind(stock_ids: list[str], start: str, end: str,
                  client: FinMindClient | None = None,
-                 with_corporate_actions: bool = True) -> tuple[Panel, pd.DataFrame]:
+                 with_corporate_actions: bool = True,
+                 industry: pd.Series | None = None) -> tuple[Panel, pd.DataFrame]:
     """Download prices (+ corporate actions) and build a Panel.
 
     Requests: 1 price + 1 dividend per stock, 1 bulk par-value call, and a
@@ -355,7 +365,7 @@ def load_finmind(stock_ids: list[str], start: str, end: str,
 
     if not with_corporate_actions:
         ret, close, value, audit = build_returns(prices)
-        return Panel(ret, close, value), audit
+        return Panel(ret, close, value, industry=industry), audit
 
     par = client.get("TaiwanStockParValueChange", start_date=start)
     div = pd.concat(divs, ignore_index=True) if divs else None
@@ -371,4 +381,4 @@ def load_finmind(stock_ids: list[str], start: str, end: str,
         cap = pd.concat(caps, ignore_index=True) if caps else None
         ev = events_from_finmind(div, cap, par)
     ret, close, value, audit = build_returns(prices, ev)
-    return Panel(ret, close, value), audit
+    return Panel(ret, close, value, industry=industry), audit

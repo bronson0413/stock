@@ -14,6 +14,7 @@ separates a real effect from a backtest artefact. Every row below is enforced by
 | **Corporate actions** | On ex-dividend, capital-reduction and par-value-change days TWSE prints the change as `X0.00` and FinMind stores `spread = 0`. Returns use the exchange **reference price** instead; unexplained gaps become NaN, not guesses | `test_corporate_actions.py` on real rows (see below) |
 | Survivorship bias | Universe = listed stocks **plus every stock delisted since the start date** (`TaiwanStockDelisting`); delisted holdings exit at their last price | `test_finmind_loader.py`, `test_backtest_mechanics.py` |
 | Taiwan frictions | 0.1425% commission, **0.3% sell tax**, slippage; **price limits** (±7% before 2015-06-01, ±10% after): no buying at limit-up, no selling at limit-down or when suspended | `test_backtest_mechanics.py` |
+| Sector bets disguised as factors | `--industry-neutral` ranks stocks within their industry (Taiwan is dominated by electronics; a raw factor can be a sector bet) | `test_neutralize_removes_pure_industry_bets` |
 | Rank IC ≠ returns | Rank IC follows medians, which fall with volatility, so it can "find" a low-vol effect in zero-mean data. The report adds the top-minus-bottom quintile **mean** spread next to it | `test_rank_ic_volatility_drag_is_caught_by_mean_spread` |
 | Data mining | **Deflated Sharpe Ratio** (Bailey & López de Prado) over all strategies in the run | `test_analysis_and_metrics.py` |
 | Overlapping samples | **Newey–West** t-statistics | idem |
@@ -65,7 +66,7 @@ backtest with DSR, excess return by year, quintile bars, IC decay, factor correl
 src/twfactor/
   data.py       Panel; synthetic market; FinMind client, universe incl. delisted, corporate-action returns
   universe.py   point-in-time investable filter (history, liquidity, price)
-  factors.py    12-1 momentum, 1M reversal, low volatility, Amihud illiquidity, MAX (lottery)
+  factors.py    12-1 momentum, 1M reversal, low volatility, Amihud illiquidity, MAX (lottery); industry neutralisation
   analysis.py   forward returns, rank IC, Newey–West t, IC decay, quintiles, factor correlation
   backtest.py   daily-drift portfolio accounting, TW costs, historical price limits, delisting exits
   ml.py         walk-forward, purged LightGBM / ridge factor combination
@@ -94,6 +95,7 @@ holdout, and illiquidity has rank-IC t = −2.7 that the mean-spread check does 
 - A stock code that was delisted and later reused by a new listing keeps only the current company.
 - Ignores the NT$20 minimum commission, round lots, market impact beyond fixed slippage, and short-sale constraints (default is long-only).
 - Limit-lock is detected from the close-to-reference return, not intraday order-book data; IPO first-5-day no-limit rules are not modelled (the 252-day history filter excludes new listings anyway).
+- Industry labels are today's classification (no history available for free); delisted stocks fall in one "unknown" group.
 - Risk-free rate is 0.
 
 Design notes (Traditional Chinese): [`docs/DESIGN_zh.md`](docs/DESIGN_zh.md)

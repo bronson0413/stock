@@ -83,3 +83,31 @@ def standardize(factor: pd.DataFrame, mask: pd.DataFrame, clip_pct: float = 0.01
     mu = f.mean(axis=1)
     sd = f.std(axis=1).replace(0, np.nan)
     return f.sub(mu, axis=0).div(sd, axis=0)
+
+
+def neutralize(z: pd.DataFrame, industry: pd.Series, dates: pd.DatetimeIndex | None = None,
+               min_group: int = 5) -> pd.DataFrame:
+    """Remove each industry's mean from a cross-sectional score, then re-z-score.
+
+    Afterwards the factor ranks stocks *within* their industry, so a "value"
+    or "low-vol" factor cannot simply be a bet on, say, financials versus
+    semiconductors. Per date only, so no look-ahead. Industries with fewer
+    than `min_group` names on a date are pooled together.
+
+    dates: only compute these rows (e.g. rebalance dates); others become NaN.
+    """
+    labels = industry.reindex(z.columns).fillna("(unknown)")
+    rows = z if dates is None else z.loc[z.index.intersection(dates)]
+    out = pd.DataFrame(np.nan, index=z.index, columns=z.columns)
+    for d, row in rows.iterrows():
+        ok = row.notna()
+        if ok.sum() < 2 * min_group:
+            continue
+        lab = labels[ok]
+        counts = lab.map(lab.value_counts())
+        lab = lab.where(counts >= min_group, "(small groups)")
+        x = row[ok]
+        resid = x - x.groupby(lab).transform("mean")
+        sd = resid.std()
+        out.loc[d, ok] = (resid - resid.mean()) / sd if sd > 0 else np.nan
+    return out

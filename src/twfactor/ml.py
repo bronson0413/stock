@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .analysis import forward_returns
-from .factors import standardize
+from .factors import neutralize, standardize
 
 
 def _stack(features: dict[str, pd.DataFrame], dates) -> pd.DataFrame:
@@ -42,13 +42,16 @@ def _ridge_fit_predict(X: np.ndarray, y: np.ndarray, Xp: np.ndarray, lam: float 
 def walk_forward_signal(panel, raw_factors: dict[str, pd.DataFrame], mask: pd.DataFrame,
                         rebal_dates: pd.DatetimeIndex, horizon: int = 21, lag: int = 1,
                         train_periods: int = 36, min_train_periods: int = 24,
-                        model: str = "auto", purge: bool = True, seed: int = 0) -> pd.DataFrame:
+                        model: str = "auto", purge: bool = True, seed: int = 0,
+                        industry: pd.Series | None = None) -> pd.DataFrame:
     """Return a signal DataFrame (rebal_dates x stocks) of out-of-sample scores.
 
     purge=False exists ONLY so the tests can show what leakage does. Never use
     it for research.
     """
     feats = {k: standardize(v, mask) for k, v in raw_factors.items()}
+    if industry is not None:
+        feats = {k: neutralize(v, industry, rebal_dates) for k, v in feats.items()}
     fwd = forward_returns(panel.ret, horizon, lag).where(mask)
     label = fwd.rank(axis=1, pct=True) - 0.5
 

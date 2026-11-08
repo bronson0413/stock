@@ -17,14 +17,9 @@ from .data import FinMindClient, FinMindError, load_finmind, make_synthetic, sto
 from .report import run_study
 
 
-def _pick_stocks(client: FinMindClient, start: str, stocks, sample: int | None, seed: int, out: Path):
+def _pick_stocks(uni, stocks, sample: int | None, seed: int) -> list[str]:
     if stocks:
         return list(stocks)
-    uni = stock_universe(client, start)
-    out.mkdir(parents=True, exist_ok=True)
-    uni.to_csv(out / "universe.csv", index=False, encoding="utf-8-sig")  # BOM so Excel shows 中文
-    n_del = int((uni["status"] == "delisted").sum())
-    print(f"Universe: {len(uni)} common stocks ({n_del} delisted since {start} -- kept to avoid survivorship bias)")
     ids = uni["stock_id"].tolist()
     if sample and sample < len(ids):
         # Random, not the first N codes: low codes are old-economy names
@@ -45,6 +40,8 @@ def main(argv: list[str] | None = None) -> None:
     common.add_argument("--commission-discount", type=float, default=1.0,
                         help="e.g. 0.6 for a 6-fold broker discount (default: no discount)")
     common.add_argument("--no-ml", action="store_true")
+    common.add_argument("--industry-neutral", action="store_true",
+                        help="rank stocks within their industry instead of across the market")
     common.add_argument("--holdout-start", default=None,
                         help="reserve data from this date as an untouched out-of-sample period")
 
@@ -93,35 +90,38 @@ def _run(args) -> None:
         panel = make_synthetic(args.stocks, args.days, seed=args.seed, start=args.start)
         res = run_study(panel, out, top_frac=args.top_frac, include_ml=not args.no_ml,
                         costs=costs, title="Synthetic market (planted signal) -- engine validation",
-                        holdout_start=args.holdout_start)
+                        holdout_start=args.holdout_start, industry_neutral=args.industry_neutral)
     else:
         client = FinMindClient(args.cache)
-        ids = _pick_stocks(client, args.start, args.stocks, args.sample, args.seed, out)
-        print(f"Loading {len(ids)} stocks (cached under {args.cache}; re-run to resume after a quota stop)...")
-        panel, audit = load_finmind(ids, args.start, args.end, client)
         out.mkdir(parents=True, exist_ok=True)
+        uni = stock_universe(client, args.start)
+        uni.to_csv(out / "universe.csv", index=False, encoding="utf-8-sig")  # BOM so Excel shows 中文
+        n_del_all = int((uni["status"] == "delisted").sum())
+        print(f"Universe: {len(uni)} common stocks ({n_del_all} delisted since {args.start} -- "
+              "kept to avoid survivorship bias)")
+        ids = _pick_stocks(uni, args.stocks, args.sample, args.seed)
+        industry = uni.set_index("stock_id")["industry_category"]
+        print(f"Loading {len(ids)} stocks (cached under {args.cache}; re-run to resume after a quota stop)...")
+        panel, audit = load_finmind(ids, args.start, args.end, client, industry=industry)
         audit.to_csv(out / "corporate_actions_audit.csv", index=False, encoding="utf-8-sig")
         n_unres = int((audit["kind"] == "unresolved").sum()) if not audit.empty else 0
         n_fix = len(audit) - n_unres
         print(f"Corporate-action days corrected: {n_fix}; unresolved (set to NaN): {n_unres}")
         loaded = list(panel.ret.columns)
+        n_del = int(uni[uni["stock_id"].isin(loaded)]["status"].eq("delisted").sum())
         notes = [
             f"Data: FinMind daily prices for {len(loaded)} stocks"
-            + (f" (random sample of {args.sample}, seed {args.seed})" if args.sample else ""),
+            + (f" (random sample of {args.sample}, seed {args.seed})" if args.sample and not args.stocks else ""),
+            f"Survivorship: {n_del} of the loaded stocks were delisted during the period and are included",
             f"Corporate actions: {n_fix} ex-dividend / capital-reduction / par-value days priced off the "
             f"exchange reference price; {n_unres} unexplained gaps left as missing "
             "(see corporate_actions_audit.csv)",
         ]
-        uni_file = out / "universe.csv"
-        if uni_file.exists() and not args.stocks:
-            import pandas as pd
-            uni = pd.read_csv(uni_file, dtype={"stock_id": str}, encoding="utf-8-sig")
-            n_del = int(uni[uni["stock_id"].isin(loaded)]["status"].eq("delisted").sum())
-            notes.append(f"Survivorship: {n_del} of the loaded stocks were delisted during the period and are included")
         res = run_study(panel, out, universe_kwargs={"min_avg_value": args.min_avg_value},
                         top_frac=args.top_frac, include_ml=not args.no_ml, costs=costs,
                         title=f"Taiwan equities {args.start} to {args.end}",
-                        holdout_start=args.holdout_start, notes=notes)
+                        holdout_start=args.holdout_start, notes=notes,
+                        industry_neutral=args.industry_neutral)
     print(res["perf"].round(3).to_string())
     if res.get("holdout") is not None:
         print("\nHoldout:")

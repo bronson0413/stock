@@ -13,7 +13,7 @@ import pandas as pd
 
 from . import analysis as A
 from .backtest import Costs, run_backtest
-from .factors import compute_all, standardize
+from .factors import compute_all, neutralize, standardize
 from .metrics import deflated_sharpe, per_period_sharpe, perf_stats
 from .ml import walk_forward_signal
 from .universe import investable
@@ -74,7 +74,8 @@ def _window_perf(results: dict, start, end, trial_names: list[str]) -> tuple[pd.
 def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
               horizon: int = 21, top_frac: float = 0.2, include_ml: bool = True,
               costs: Costs = Costs(), title: str = "Factor study",
-              holdout_start: str | None = None, notes: list[str] | None = None) -> dict:
+              holdout_start: str | None = None, notes: list[str] | None = None,
+              industry_neutral: bool = False) -> dict:
     """Run every factor through diagnostics and the backtest and write report.md.
 
     holdout_start: if given, every table and figure is computed on the
@@ -106,10 +107,21 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
     else:
         h0, res_dates, hold_dates = end_all, dates, pd.DatetimeIndex([])
 
+    notes = list(notes or [])
+    industry = None
+    if industry_neutral:
+        if panel.industry is None:
+            raise ValueError("industry_neutral=True needs panel.industry")
+        industry = panel.industry
+        z = {k: neutralize(v, industry, dates) for k, v in z.items()}
+        n_ind = industry.reindex(panel.ret.columns).nunique()
+        notes.append(f"Factors are industry-neutralised ({n_ind} industry labels, today's classification)")
+
     signals = dict(z)
     signals["composite_equal"] = sum(z.values()) / len(z)
     if include_ml:
-        signals["ml_walk_forward"] = walk_forward_signal(panel, raw, mask, dates, horizon=horizon)
+        signals["ml_walk_forward"] = walk_forward_signal(panel, raw, mask, dates, horizon=horizon,
+                                                         industry=industry)
     if panel.true_signal is not None:
         signals["TRUE_SIGNAL (synthetic oracle)"] = panel.true_signal
 
@@ -220,7 +232,7 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
         f"- DSR computed over {len(trial_names)} trials (every strategy in the table except the oracle). "
         "It only counts what is in this run: every earlier variant you tried is also a trial.",
     ]
-    md += [f"- {n}" for n in (notes or [])]
+    md += [f"- {n}" for n in notes]
     md += [
         "",
         f"## 1. Predictive power (rank IC, {horizon}-day forward, monthly samples)",
