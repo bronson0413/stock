@@ -185,7 +185,7 @@ DSR（Bailey & López de Prado, 2014）：
 1. 「被擋下的交易數」原本算全期間，把保留期的資訊帶進研究期表格
 2. IC 衰減的長天數窗口跨過邊界
 
-**模擬資料的示範：** 動能在研究期的 rank IC t = 2.5，到保留期 IC 只剩 0.007；埋入的真訊號在保留期仍然成立（超額夏普 2.7）。
+**模擬資料的示範：** 動能在研究期的 rank IC t = 2.5，到保留期 IC 只剩 0.007；埋入的真訊號在保留期仍然成立（超額夏普 2.7）。動能其實部分代理了真訊號，在保留期變弱有一部分是運氣，所以保留期本身也有雜訊：兩年多、二十幾次換股，不足以下定論。
 
 **使用紀律：** 保留期只能看一次。看過之後再回去改因子或參數，它就不再是樣本外了。
 
@@ -235,7 +235,7 @@ DSR（Bailey & López de Prado, 2014）：
 **第一步：自己跑一次（約 1 小時）**
 1. 到 FinMind 註冊拿免費 token（每小時 600 次請求，未註冊是 300 次）。
 2. PowerShell：`$env:FINMIND_TOKEN="你的token"`
-3. `pip install -e ".[dev]"`，接著 `pip install lightgbm`，再跑 `pytest`，確認全部測試通過
+3. `pip install -e ".[dev,ml]"`，再跑 `pytest`，確認全部測試通過
 4. 先跑小樣本：
    ```
    twfactor finmind --start 2016-01-01 --end 2025-12-31 --sample 300 --holdout-start 2023-01-01 --out reports/tw300

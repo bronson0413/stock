@@ -1,5 +1,7 @@
 # twfactor — cross-sectional factor research for Taiwan equities
 
+[![tests](https://github.com/bronson0413/stock/actions/workflows/ci.yml/badge.svg)](https://github.com/bronson0413/stock/actions/workflows/ci.yml)
+
 A small, test-first research engine for asking one question honestly:
 **does this signal predict Taiwan stock returns after realistic costs, or does it only look like it does?**
 
@@ -29,13 +31,13 @@ separates a real effect from a backtest artefact. Every row below is enforced by
 | 2327 | 2017-08-18 | cash capital reduction | +46.89% | 0.00% | **+5.28%** |
 
 Rows were pulled from FinMind (the 2412 month was also checked against the TWSE `STOCK_DAY`
-page, which shows `X0.00` on the ex-dividend day); they live in `tests/fixtures/`. Errors of this size on a handful of days are enough to rewrite momentum and
-volatility rankings.
+page, which shows `X0.00` on the ex-dividend day); they live in `tests/fixtures/`. Errors of
+this size on a handful of days are enough to rewrite momentum and volatility rankings.
 
 ## Quick start
 
 ```bash
-pip install -e ".[dev]"          # optional: pip install lightgbm (else ridge regression)
+pip install -e ".[dev,ml]"       # drop ",ml" to skip LightGBM (falls back to ridge regression)
 pytest                           # ~15 s, no network needed
 
 # 1) Validate the engine on a simulated market with a planted signal
@@ -83,9 +85,10 @@ data, not because they are expected to work in Taiwan. Whether they do is what t
 `reports/synthetic/` (2016–2025, holdout from 2023): the planted signal is recovered in the research
 window (rank IC 0.079, NW t 11.2, Q5−Q1 t 8.7) and holds up in the holdout. The price/volume factors,
 which have no effect planted, mostly fail after costs; 1-month reversal pays about 6% a year in
-costs at 9× turnover. Two instructive false positives appear: momentum looks real in-sample
-(the planted signal is persistent, so past returns partly proxy for it) and fades in the
-holdout, and illiquidity has rank-IC t = −2.7 that the mean-spread check does not confirm.
+costs at 9× turnover. Two things worth noticing: illiquidity has rank-IC t = −2.7 that the
+mean-spread check does not confirm (volatility drag, see above); and momentum is significant
+in-sample because past returns partly proxy for the persistent planted signal, yet it is much
+weaker in the holdout, a reminder that a single holdout period is noisy too.
 
 **No real-market results are claimed in this repository yet.**
 
