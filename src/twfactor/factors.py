@@ -1,4 +1,4 @@
-"""Price/volume factors.
+"""Price/volume and fundamental factors.
 
 Convention: a factor value at row t uses data up to and including the close of
 t, and "higher = expected to outperform". Execution happens later (see
@@ -57,18 +57,76 @@ def max_return(panel) -> pd.DataFrame:
     return -panel.ret.rolling(21, min_periods=15).max()
 
 
+def _fund(panel, name: str) -> pd.DataFrame | None:
+    f = getattr(panel, "fundamentals", None) or {}
+    return f.get(name)
+
+
+def book_to_price(panel) -> pd.DataFrame | None:
+    """1 / PBR (value). Negative book value -> excluded."""
+    pbr = _fund(panel, "PBR")
+    return None if pbr is None else 1.0 / pbr.where(pbr > 0)
+
+
+def earnings_yield(panel) -> pd.DataFrame | None:
+    """1 / PER. The exchange reports PER as 0/blank for loss-makers, so they
+    are excluded rather than ranked -- a known simplification."""
+    per = _fund(panel, "PER")
+    return None if per is None else 1.0 / per.where(per > 0)
+
+
+def dividend_yield(panel) -> pd.DataFrame | None:
+    """Trailing cash dividend yield as published by the exchange."""
+    dy = _fund(panel, "dividend_yield")
+    return None if dy is None else dy.where(dy >= 0)
+
+
+def revenue_growth(panel) -> pd.DataFrame | None:
+    """log(last 3 months revenue / same months a year earlier), as of the
+    date the latest month was public (see fundamentals.py)."""
+    return _fund(panel, "rev_yoy_3m")
+
+
+def revenue_high(panel) -> pd.DataFrame | None:
+    """log(latest monthly revenue / max of the previous 12 months)."""
+    return _fund(panel, "rev_vs_high")
+
+
 FACTORS: dict[str, Callable] = {
     "momentum_12_1": momentum_12_1,
     "reversal_1m": reversal_1m,
     "low_volatility": low_volatility,
     "illiquidity": illiquidity,
     "max_return": max_return,
+    "book_to_price": book_to_price,
+    "earnings_yield": earnings_yield,
+    "dividend_yield": dividend_yield,
+    "revenue_growth": revenue_growth,
+    "revenue_high": revenue_high,
 }
 
 
 def compute_all(panel, names: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    """All factors whose input data the panel has (fundamentals are optional)."""
     names = names or list(FACTORS)
-    return {n: FACTORS[n](panel) for n in names}
+    out = {n: FACTORS[n](panel) for n in names}
+    return {n: f for n, f in out.items() if f is not None}
+
+
+def composite(zs: dict[str, pd.DataFrame], min_frac: float = 0.5) -> pd.DataFrame:
+    """Equal-weight average of z-scores, skipping missing ones.
+
+    A stock needs at least `min_frac` of the factors; otherwise one missing
+    input (e.g. no PER for a loss-maker) would drop it entirely.
+    """
+    stack = np.stack([z.to_numpy() for z in zs.values()])
+    count = np.isfinite(stack).sum(axis=0)
+    total = np.where(np.isfinite(stack), stack, 0.0).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = total / count
+    mean = np.where(count >= max(1, int(np.ceil(min_frac * len(zs)))), mean, np.nan)
+    first = next(iter(zs.values()))
+    return pd.DataFrame(mean, index=first.index, columns=first.columns)
 
 
 def standardize(factor: pd.DataFrame, mask: pd.DataFrame, clip_pct: float = 0.01) -> pd.DataFrame:

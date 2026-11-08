@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> None:
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--min-avg-value", type=float, default=2e7)
     f.add_argument("--cache", default="data/cache")
+    f.add_argument("--no-fundamentals", action="store_true",
+                   help="skip PER/PBR and monthly revenue (halves the download)")
 
     a = sub.add_parser("audit", help="show every corporate-action correction for some stocks")
     a.add_argument("--start", required=True)
@@ -75,7 +77,8 @@ def main(argv: list[str] | None = None) -> None:
 
 def _run(args) -> None:
     if args.cmd == "audit":
-        _, audit = load_finmind(args.stocks, args.start, args.end, FinMindClient(args.cache))
+        _, audit = load_finmind(args.stocks, args.start, args.end, FinMindClient(args.cache),
+                                fundamentals=False)
         if audit.empty:
             print("No corporate-action days in range.")
         else:
@@ -102,7 +105,9 @@ def _run(args) -> None:
         ids = _pick_stocks(uni, args.stocks, args.sample, args.seed)
         industry = uni.set_index("stock_id")["industry_category"]
         print(f"Loading {len(ids)} stocks (cached under {args.cache}; re-run to resume after a quota stop)...")
-        panel, audit = load_finmind(ids, args.start, args.end, client, industry=industry)
+        panel, audit = load_finmind(ids, args.start, args.end, client, industry=industry,
+                                    fundamentals=not args.no_fundamentals,
+                                    min_avg_value=args.min_avg_value)
         audit.to_csv(out / "corporate_actions_audit.csv", index=False, encoding="utf-8-sig")
         n_unres = int((audit["kind"] == "unresolved").sum()) if not audit.empty else 0
         n_fix = len(audit) - n_unres

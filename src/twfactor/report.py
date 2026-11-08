@@ -7,13 +7,14 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+import matplotlib.dates  # noqa: F401  (used via matplotlib.dates in _small_multiples)
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from . import analysis as A
 from .backtest import Costs, run_backtest
-from .factors import compute_all, neutralize, standardize
+from .factors import composite, compute_all, neutralize, standardize
 from .metrics import deflated_sharpe, per_period_sharpe, perf_stats
 from .ml import walk_forward_signal
 from .universe import investable
@@ -31,6 +32,37 @@ def _style(ax):
     ax.tick_params(colors=MUTED, labelsize=8)
     ax.grid(axis="y", color=GRID, linewidth=0.6)
     ax.set_axisbelow(True)
+
+
+def _small_multiples(series: dict, kind: str, title: str, path, baseline: float = 0.0,
+                     ncol: int = 4) -> None:
+    """One small panel per series, single color, shared y-axis.
+
+    Used instead of one chart with a line per strategy: with ten-plus
+    strategies a categorical palette runs out and colors would repeat.
+    """
+    names = list(series)
+    nrow = int(np.ceil(len(names) / ncol))
+    fig, axes = plt.subplots(nrow, ncol, figsize=(10, 2.3 * nrow), sharey=True, squeeze=False)
+    for ax, n in zip(axes.ravel(), names):
+        v = series[n]
+        if kind == "line":
+            ax.plot(v.index, v.values, color=SERIES[0], linewidth=1.4)
+            ax.tick_params(axis="x", labelrotation=0)
+            ax.xaxis.set_major_locator(matplotlib.dates.YearLocator(base=2))
+            ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter("%Y"))
+        else:
+            ax.bar(range(len(v)), v.values, color=SERIES[0], width=0.65)
+            ax.set_xticks(range(len(v)), list(v.index))
+        ax.axhline(baseline, color=MUTED, linewidth=0.8)
+        ax.set_title(n, fontsize=8, color=INK, loc="left")
+        _style(ax)
+    for ax in axes.ravel()[len(names):]:
+        ax.axis("off")
+    fig.suptitle(title, fontsize=10, x=0.01, ha="left", color=INK)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def _md_table(df: pd.DataFrame, fmt: dict | None = None) -> str:
@@ -118,7 +150,7 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
         notes.append(f"Factors are industry-neutralised ({n_ind} industry labels, today's classification)")
 
     signals = dict(z)
-    signals["composite_equal"] = sum(z.values()) / len(z)
+    signals["composite_equal"] = composite(z)
     if include_ml:
         signals["ml_walk_forward"] = walk_forward_signal(panel, raw, mask, dates, horizon=horizon,
                                                          industry=industry)
@@ -157,17 +189,9 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
     yearly = pd.DataFrame({n: (1 + e).groupby(e.index.year).prod() - 1 for n, e in excess.items()}).T
 
     # ---- figures ----
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    for i, n in enumerate(trial_names):
-        (1 + excess[n]).cumprod().plot(ax=ax, color=SERIES[i % len(SERIES)], linewidth=1.6, label=n)
-    ax.axhline(1, color=MUTED, linewidth=0.8)
-    ax.set_title("Cumulative excess return vs equal-weight universe (net of costs)", color=INK, fontsize=10, loc="left")
-    ax.set_xlabel("")
-    _style(ax)
-    ax.legend(fontsize=7, frameon=False, ncol=2)
-    fig.tight_layout()
-    fig.savefig(out / "figures" / "excess_equity.png", dpi=150)
-    plt.close(fig)
+    _small_multiples({n: (1 + excess[n]).cumprod() for n in trial_names}, "line",
+                     "Cumulative excess return vs equal-weight universe, net of costs (1.0 = benchmark)",
+                     out / "figures" / "excess_equity.png", baseline=1.0)
 
     names_q = list(quant)
     ncol = 4
@@ -187,17 +211,8 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
     plt.close(fig)
 
     dec = pd.DataFrame(decay)
-    fig, ax = plt.subplots(figsize=(7, 3.6))
-    for i, n in enumerate(dec.columns):
-        ax.plot(range(len(dec)), dec[n], marker="o", markersize=4, linewidth=1.6, color=SERIES[i], label=n)
-    ax.set_xticks(range(len(dec)), [f"{h}d" for h in dec.index])
-    ax.axhline(0, color=MUTED, linewidth=0.8)
-    ax.set_title("Mean rank IC by forward horizon", fontsize=10, color=INK, loc="left")
-    _style(ax)
-    ax.legend(fontsize=7, frameon=False)
-    fig.tight_layout()
-    fig.savefig(out / "figures" / "ic_decay.png", dpi=150)
-    plt.close(fig)
+    _small_multiples({n: dec[n].set_axis([f"{h}d" for h in dec.index]) for n in dec.columns}, "bar",
+                     "Mean rank IC by forward horizon", out / "figures" / "ic_decay.png", baseline=0.0)
 
     # ---- holdout (looked at once, after research is frozen) ----
     hold_df = None

@@ -50,7 +50,9 @@ def _fake_api(calls):
         table = {"TaiwanStockPrice": prices, "TaiwanStockDividendResult": div,
                  "TaiwanStockCapitalReductionReferencePrice": cap,
                  "TaiwanStockParValueChange": par, "TaiwanStockInfo": info,
-                 "TaiwanStockDelisting": delist}[ds]
+                 "TaiwanStockDelisting": delist,
+                 "TaiwanStockPER": pd.DataFrame(columns=["date", "stock_id"]),
+                 "TaiwanStockMonthRevenue": pd.DataFrame(columns=["date", "stock_id"])}[ds]
         if sid is not None:
             table = table[table["stock_id"] == sid]
         return FakeResp({"status": 200, "msg": "success", "data": table.to_dict("records")})
@@ -68,7 +70,8 @@ def client(tmp_path, monkeypatch):
 
 
 def test_end_to_end_returns_and_request_plan(client):
-    panel, audit = D.load_finmind(["2412", "2327"], "2017-01-01", "2025-12-31", client)
+    panel, audit = D.load_finmind(["2412", "2327"], "2017-01-01", "2025-12-31", client,
+                                  fundamentals=False)
     r = panel.ret
     assert r.loc["2024-07-04", "2412"] == pytest.approx(118.5 / 120.74 - 1)
     assert r.loc["2025-08-25", "2327"] == pytest.approx(143 / 136.5 - 1)
@@ -88,6 +91,7 @@ def test_second_run_is_served_from_cache(client):
     D.load_finmind(["2412", "2327"], "2017-01-01", "2025-12-31", client)
     n = len(client.calls)
     D.load_finmind(["2412", "2327"], "2017-01-01", "2025-12-31", client)
+    assert any(c["dataset"] == "TaiwanStockMonthRevenue" for c in client.calls)
     assert len(client.calls) == n
 
 
@@ -130,4 +134,30 @@ def test_other_4xx_is_not_retried(tmp_path, monkeypatch):
     c = D.FinMindClient(tmp_path, sleep=0, verbose=False)
     with pytest.raises(D.FinMindError):
         c.get("TaiwanStockDividendResult", start_date="2024-01-01")
+    assert len(calls) == 1
+
+
+def test_extra_data_only_for_ever_liquid_stocks(client):
+    # In the fixture only 2412 has a long enough run of days for a 20-day average
+    # above NT$1.5bn; 2327 must get prices but nothing else.
+    D.load_finmind(["2412", "2327"], "2017-01-01", "2025-12-31", client, min_avg_value=1.5e9)
+    by_ds = {}
+    for c in client.calls:
+        by_ds.setdefault(c["dataset"], []).append(c.get("data_id"))
+    assert sorted(by_ds["TaiwanStockPrice"]) == ["2327", "2412"]
+    for ds in ("TaiwanStockDividendResult", "TaiwanStockPER", "TaiwanStockMonthRevenue"):
+        assert by_ds[ds] == ["2412"], ds
+
+
+def test_empty_response_is_cached_and_readable(tmp_path, monkeypatch):
+    calls = []
+
+    def empty(*a, **k):
+        calls.append(1)
+        return FakeResp({"status": 200, "msg": "success", "data": []})
+
+    monkeypatch.setattr(D.requests, "get", empty)
+    c = D.FinMindClient(tmp_path, sleep=0, verbose=False)
+    for _ in range(2):
+        assert c.get("TaiwanStockDividendResult", data_id="9999", start_date="2020-01-01").empty
     assert len(calls) == 1

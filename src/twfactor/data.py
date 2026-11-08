@@ -37,6 +37,8 @@ class Panel:
     value   traded value in NTD (used for the liquidity filter and Amihud).
     true_signal  synthetic data only: the planted predictive signal.
     industry     optional stock_id -> industry label, for industry neutralisation.
+    fundamentals optional {name: wide frame} already aligned to the date each
+                 value was public (see fundamentals.py), e.g. PBR, rev_yoy_3m.
     """
 
     ret: pd.DataFrame
@@ -44,6 +46,7 @@ class Panel:
     value: pd.DataFrame
     true_signal: pd.DataFrame | None = None
     industry: pd.Series | None = None
+    fundamentals: dict | None = None
 
     def __post_init__(self) -> None:
         for name in ("close", "value"):
@@ -54,7 +57,9 @@ class Panel:
     def truncate(self, end) -> "Panel":
         """Return a copy containing data up to and including `end`."""
         sig = None if self.true_signal is None else self.true_signal.loc[:end]
-        return Panel(self.ret.loc[:end], self.close.loc[:end], self.value.loc[:end], sig, self.industry)
+        fund = None if self.fundamentals is None else {k: v.loc[:end] for k, v in self.fundamentals.items()}
+        return Panel(self.ret.loc[:end], self.close.loc[:end], self.value.loc[:end], sig,
+                     self.industry, fund)
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +276,10 @@ class FinMindClient:
         key = "_".join(f"{k}={v}" for k, v in sorted(params.items())) or "all"
         path = self.cache / dataset / f"{key}.csv"
         if path.exists():
-            return pd.read_csv(path, dtype={"stock_id": str})
+            try:
+                return pd.read_csv(path, dtype={"stock_id": str})
+            except pd.errors.EmptyDataError:  # cached "no rows" (e.g. a stock that never paid a dividend)
+                return pd.DataFrame()
 
         quota_waits = server_retries = 0
         while True:
@@ -337,48 +345,90 @@ def stock_universe(client: FinMindClient, start: str) -> pd.DataFrame:
     return pd.concat([listed, delisted], ignore_index=True).sort_values("stock_id").reset_index(drop=True)
 
 
+def _fetch_each(client: "FinMindClient", dataset: str, ids: list[str], label: str, **params) -> list:
+    frames = []
+    for n, sid in enumerate(ids, 1):
+        df = client.get(dataset, data_id=sid, **params)
+        if not df.empty:
+            frames.append(df)
+        if client.verbose and n % 100 == 0:
+            print(f"  {label}: {n}/{len(ids)} ({client.requests_made} new requests)")
+    return frames
+
+
+def ever_liquid(prices: pd.DataFrame, min_avg_value: float, window: int = 20) -> list[str]:
+    """Stocks whose rolling average traded value reached `min_avg_value` at
+    least once. Used ONLY to skip downloading extra data for stocks that can
+    never enter the investable universe (which is itself point-in-time), so it
+    saves requests without leaking anything into results."""
+    px = prices[prices["Trading_Volume"] > 0]
+    v = px.pivot_table(index="date", columns="stock_id", values="Trading_money", aggfunc="last")
+    hit = v.rolling(window, min_periods=window * 3 // 4).mean().max() >= min_avg_value
+    return sorted(hit[hit].index.astype(str))
+
+
 def load_finmind(stock_ids: list[str], start: str, end: str,
                  client: FinMindClient | None = None,
                  with_corporate_actions: bool = True,
-                 industry: pd.Series | None = None) -> tuple[Panel, pd.DataFrame]:
-    """Download prices (+ corporate actions) and build a Panel.
+                 industry: pd.Series | None = None,
+                 fundamentals: bool = True,
+                 min_avg_value: float | None = None) -> tuple[Panel, pd.DataFrame]:
+    """Download prices, corporate actions and fundamentals, and build a Panel.
 
-    Requests: 1 price + 1 dividend per stock, 1 bulk par-value call, and a
-    capital-reduction call only for stocks that still have unexplained X-days
-    after dividends are applied. Returns (panel, audit).
+    Requests: 1 price request per stock; then, only for stocks that were ever
+    liquid enough to trade (`min_avg_value`, see `ever_liquid`), 1 dividend,
+    1 valuation (PER/PBR) and 1 monthly-revenue request each; 1 bulk
+    par-value request; and capital reductions only where gaps remain.
+    Returns (panel, audit).
     """
     client = client or FinMindClient()
-    prices, divs = [], []
-    for n, sid in enumerate(stock_ids, 1):
-        p = client.get("TaiwanStockPrice", data_id=sid, start_date=start, end_date=end)
-        if not p.empty:
-            prices.append(p)
-            if with_corporate_actions:
-                d = client.get("TaiwanStockDividendResult", data_id=sid, start_date=start, end_date=end)
-                if not d.empty:
-                    divs.append(d)
-        if client.verbose and n % 50 == 0:
-            print(f"  {n}/{len(stock_ids)} stocks ({client.requests_made} new requests)")
+    prices = _fetch_each(client, "TaiwanStockPrice", stock_ids, "prices",
+                         start_date=start, end_date=end)
     if not prices:
         raise FinMindError("No price data returned")
     prices = pd.concat(prices, ignore_index=True)
+    prices["stock_id"] = prices["stock_id"].astype(str)
+
+    focus = ever_liquid(prices, min_avg_value) if min_avg_value else sorted(prices["stock_id"].unique())
+    if client.verbose and min_avg_value:
+        print(f"  {len(focus)} of {prices['stock_id'].nunique()} stocks were ever liquid enough to trade; "
+              "fetching corporate actions / fundamentals for those")
 
     if not with_corporate_actions:
         ret, close, value, audit = build_returns(prices)
-        return Panel(ret, close, value, industry=industry), audit
+    else:
+        divs = _fetch_each(client, "TaiwanStockDividendResult", focus, "dividends",
+                           start_date=start, end_date=end)
+        par = client.get("TaiwanStockParValueChange", start_date=start)
+        div = pd.concat(divs, ignore_index=True) if divs else None
+        ev = events_from_finmind(div, None, par)
+        _, _, _, audit = build_returns(prices, ev)
+        need = sorted(set(audit.loc[audit["kind"] == "unresolved", "stock_id"]) & set(focus))
+        if need:
+            caps = _fetch_each(client, "TaiwanStockCapitalReductionReferencePrice", need,
+                               "capital reductions", start_date=start)
+            cap = pd.concat(caps, ignore_index=True) if caps else None
+            ev = events_from_finmind(div, cap, par)
+        ret, close, value, audit = build_returns(prices, ev)
 
-    par = client.get("TaiwanStockParValueChange", start_date=start)
-    div = pd.concat(divs, ignore_index=True) if divs else None
-    ev = events_from_finmind(div, None, par)
-    _, _, _, audit = build_returns(prices, ev)
-    need = sorted(audit.loc[audit["kind"] == "unresolved", "stock_id"].unique())
-    if need:
-        if client.verbose:
-            print(f"  fetching capital reductions for {len(need)} stocks with unexplained gaps")
-        caps = [client.get("TaiwanStockCapitalReductionReferencePrice", data_id=s, start_date=start)
-                for s in need]
-        caps = [c for c in caps if not c.empty]
-        cap = pd.concat(caps, ignore_index=True) if caps else None
-        ev = events_from_finmind(div, cap, par)
-    ret, close, value, audit = build_returns(prices, ev)
-    return Panel(ret, close, value, industry=industry), audit
+    fund = None
+    if fundamentals:
+        from .fundamentals import align_daily_valuation, align_monthly_revenue
+        fund = {}
+        try:
+            per = _fetch_each(client, "TaiwanStockPER", focus, "valuation",
+                              start_date=start, end_date=end)
+            fund.update(align_daily_valuation(pd.concat(per, ignore_index=True) if per else None,
+                                              ret.index, ret.columns))
+        except FinMindError as e:
+            print(f"  valuation data unavailable, skipping value factors: {e}")
+        try:
+            # one extra year so the first year-over-year growth is defined
+            rev_start = str(pd.Timestamp(start).year - 1) + "-01-01"
+            rev = _fetch_each(client, "TaiwanStockMonthRevenue", focus, "monthly revenue",
+                              start_date=rev_start, end_date=end)
+            fund.update(align_monthly_revenue(pd.concat(rev, ignore_index=True) if rev else None,
+                                              ret.index, ret.columns))
+        except FinMindError as e:
+            print(f"  monthly revenue unavailable, skipping revenue factors: {e}")
+    return Panel(ret, close, value, industry=industry, fundamentals=fund or None), audit
