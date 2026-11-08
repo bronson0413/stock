@@ -189,6 +189,8 @@ def build_returns(prices: pd.DataFrame, events: pd.DataFrame | None = None
     px["stock_id"] = px["stock_id"].astype(str)
     # Zero-volume rows are suspended / no-trade days: the close is not a traded price.
     px = px[px["Trading_Volume"] > 0].sort_values(["stock_id", "date"])
+    # A duplicated (stock, date) row would make shift(1) pair a day with itself.
+    px = px.drop_duplicates(["stock_id", "date"], keep="last")
     px["prev_close"] = px.groupby("stock_id")["close"].shift(1)
     px["ret"] = px["close"] / px["prev_close"] - 1
 

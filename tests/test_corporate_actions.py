@@ -73,3 +73,10 @@ def test_conflicting_events_on_same_day_are_dropped():
     div = pd.DataFrame({"date": ["2024-07-04"], "stock_id": ["2412"], "before_price": [125.5], "reference_price": [120.74]})
     par = pd.DataFrame({"date": ["2024-07-04"], "stock_id": ["2412"], "before_close": [125.5], "after_ref_close": [60.0]})
     assert events_from_finmind(div, None, par).empty
+
+
+def test_duplicate_rows_do_not_break_previous_close():
+    prices = pd.read_csv(FIX / "prices.csv", dtype={"stock_id": str})
+    dup = pd.concat([prices, prices[prices["date"] == "2024-07-05"]], ignore_index=True)
+    ret, *_ = build_returns(dup, None)
+    assert _r(ret, "2024-07-05", "2412") == pytest.approx(120 / 118.5 - 1)

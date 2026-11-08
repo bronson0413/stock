@@ -20,6 +20,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[dev]"
-      - run: pytest -q
+      - name: Tests (ridge fallback, no LightGBM)
+        run: pytest -q
+      - run: pip install -e ".[dev,ml]"
+      - name: Tests (LightGBM)
+        run: pytest -q
       - name: Engine validation on synthetic data (no ML, fast)
         run: twfactor synthetic --no-ml --out reports/ci
