@@ -79,12 +79,14 @@ def walk_forward_signal(panel, raw_factors: dict[str, pd.DataFrame], mask: pd.Da
         X, y = train.drop(columns="y").to_numpy(), train["y"].to_numpy()
         Xp = test.to_numpy()
         if use_lgb:
+            # Native API: the sklearn wrapper (LGBMRegressor) needs scikit-learn installed.
             import lightgbm as lgb
-            m = lgb.LGBMRegressor(n_estimators=200, learning_rate=0.03, num_leaves=15,
-                                  min_child_samples=200, subsample=0.8, subsample_freq=1,
-                                  colsample_bytree=0.8, random_state=seed, verbose=-1)
-            m.fit(X, y)
-            pred = m.predict(Xp)
+            params = {"objective": "regression", "learning_rate": 0.03, "num_leaves": 15,
+                      "min_data_in_leaf": 200, "bagging_fraction": 0.8, "bagging_freq": 1,
+                      "feature_fraction": 0.8, "seed": seed, "deterministic": True,
+                      "num_threads": 1, "verbose": -1}
+            booster = lgb.train(params, lgb.Dataset(X, y), num_boost_round=200)
+            pred = booster.predict(Xp)
         else:
             pred = _ridge_fit_predict(X, y, Xp)
         stocks = test.index.get_level_values(1)
