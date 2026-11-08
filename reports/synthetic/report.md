@@ -25,16 +25,18 @@
 
 ## 2. Backtest (net of costs)
 
-| strategy | net_cagr | net_sharpe | max_dd | excess_ann | excess_sharpe | ann_turnover | ann_cost | DSR | blocked_trades | delisted_exits |
-|---|---|---|---|---|---|---|---|---|---|---|
-| momentum_12_1 | -0.1% | 0.081 | -38.7% | 0.9% | 0.222 | 3.3x | 2.2% | 0.073 | 1 | 3 |
-| reversal_1m | -7.2% | -0.334 | -43.9% | -6.3% | -1.262 | 9.4x | 6.4% | 0.000 | 1 | 1 |
-| low_volatility | -2.4% | -0.079 | -34.2% | -1.7% | -0.426 | 2.6x | 1.7% | 0.003 | 0 | 3 |
-| illiquidity | -4.8% | -0.186 | -41.3% | -3.8% | -0.789 | 2.9x | 2.0% | 0.000 | 0 | 4 |
-| max_return | -8.2% | -0.454 | -41.7% | -7.5% | -1.812 | 7.5x | 5.1% | 0.000 | 0 | 2 |
-| composite_equal | -3.4% | -0.125 | -37.5% | -2.5% | -0.599 | 6.8x | 4.7% | 0.001 | 0 | 1 |
-| ml_walk_forward | -7.6% | -0.371 | -42.2% | -6.7% | -1.390 | 8.4x | 5.7% | 0.000 | 0 | 6 |
-| TRUE_SIGNAL (synthetic oracle) | 9.7% | 0.623 | -28.2% | 10.7% | 2.311 | 3.5x | 2.4% | nan | 0 | 2 |
+| strategy | net_cagr | net_sharpe | max_dd | gross_excess_ann | excess_ann | excess_sharpe | ann_turnover | ann_cost | DSR | blocked_trades | delisted_exits |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| momentum_12_1 | -0.1% | 0.081 | -38.7% | 3.2% | 0.9% | 0.222 | 3.3x | 2.2% | 0.073 | 1 | 3 |
+| reversal_1m | -7.2% | -0.334 | -43.9% | -0.0% | -6.3% | -1.262 | 9.4x | 6.4% | 0.000 | 1 | 1 |
+| low_volatility | -2.4% | -0.079 | -34.2% | 0.0% | -1.7% | -0.426 | 2.6x | 1.7% | 0.003 | 0 | 3 |
+| illiquidity | -4.8% | -0.186 | -41.3% | -1.8% | -3.8% | -0.789 | 2.9x | 2.0% | 0.000 | 0 | 4 |
+| max_return | -8.2% | -0.454 | -41.7% | -2.6% | -7.5% | -1.812 | 7.5x | 5.1% | 0.000 | 0 | 2 |
+| composite_equal | -3.4% | -0.125 | -37.5% | 2.2% | -2.5% | -0.599 | 6.8x | 4.7% | 0.001 | 0 | 1 |
+| ml_walk_forward | -7.6% | -0.371 | -42.2% | -1.3% | -6.7% | -1.390 | 8.4x | 5.7% | 0.000 | 0 | 6 |
+| TRUE_SIGNAL (synthetic oracle) | 9.7% | 0.623 | -28.2% | 13.5% | 10.7% | 2.311 | 3.5x | 2.4% | nan | 0 | 2 |
+
+`gross_excess_ann` is before costs and `excess_ann` after; the gap is what trading costs take.
 
 ![excess](figures/excess_equity.png)
 
@@ -79,16 +81,16 @@
 
 ## 7. Holdout (out-of-sample, not used for any decision above)
 
-| strategy | ic_mean | net_cagr | net_sharpe | max_dd | excess_ann | excess_sharpe | ann_turnover | ann_cost | blocked_trades | delisted_exits |
-|---|---|---|---|---|---|---|---|---|---|---|
-| momentum_12_1 | 0.007 | -9.0% | -0.507 | -33.0% | 0.3% | 0.090 | 3.3x | 2.2% | 1 | 0 |
-| reversal_1m | -0.013 | -15.4% | -0.925 | -40.6% | -6.6% | -1.254 | 9.5x | 6.5% | 0 | 2 |
-| low_volatility | 0.036 | -7.1% | -0.443 | -29.5% | 2.2% | 0.568 | 2.6x | 1.8% | 0 | 2 |
-| illiquidity | -0.030 | -16.3% | -0.965 | -42.4% | -7.6% | -1.600 | 3.2x | 2.2% | 0 | 4 |
-| max_return | 0.026 | -12.7% | -0.842 | -37.8% | -3.9% | -0.844 | 7.9x | 5.4% | 0 | 2 |
-| composite_equal | 0.015 | -15.2% | -0.999 | -40.1% | -6.5% | -1.550 | 6.9x | 4.7% | 0 | 0 |
-| ml_walk_forward | -0.010 | -13.6% | -0.831 | -37.8% | -4.8% | -1.029 | 8.6x | 5.9% | 1 | 2 |
-| TRUE_SIGNAL (synthetic oracle) | 0.079 | 3.5% | 0.290 | -21.4% | 14.1% | 2.729 | 3.7x | 2.6% | 0 | 0 |
+| strategy | ic_mean | net_cagr | net_sharpe | max_dd | gross_excess_ann | excess_ann | excess_sharpe | ann_turnover | ann_cost | blocked_trades | delisted_exits |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| momentum_12_1 | 0.007 | -9.0% | -0.507 | -33.0% | 2.6% | 0.3% | 0.090 | 3.3x | 2.2% | 1 | 0 |
+| reversal_1m | -0.013 | -15.4% | -0.925 | -40.6% | -0.3% | -6.6% | -1.254 | 9.5x | 6.5% | 0 | 2 |
+| low_volatility | 0.036 | -7.1% | -0.443 | -29.5% | 4.1% | 2.2% | 0.568 | 2.6x | 1.8% | 0 | 2 |
+| illiquidity | -0.030 | -16.3% | -0.965 | -42.4% | -5.6% | -7.6% | -1.600 | 3.2x | 2.2% | 0 | 4 |
+| max_return | 0.026 | -12.7% | -0.842 | -37.8% | 1.4% | -3.9% | -0.844 | 7.9x | 5.4% | 0 | 2 |
+| composite_equal | 0.015 | -15.2% | -0.999 | -40.1% | -2.0% | -6.5% | -1.550 | 6.9x | 4.7% | 0 | 0 |
+| ml_walk_forward | -0.010 | -13.6% | -0.831 | -37.8% | 1.0% | -4.8% | -1.029 | 8.6x | 5.9% | 1 | 2 |
+| TRUE_SIGNAL (synthetic oracle) | 0.079 | 3.5% | 0.290 | -21.4% | 17.1% | 14.1% | 2.729 | 3.7x | 2.6% | 0 | 0 |
 
 Read this once. If you change a factor or parameter after seeing it, the holdout
 is no longer out-of-sample.

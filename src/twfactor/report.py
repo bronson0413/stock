@@ -89,8 +89,10 @@ def _window_perf(results: dict, start, end, trial_names: list[str]) -> tuple[pd.
         d = sl(r.daily)
         st, ex = perf_stats(d["net"]), perf_stats(excess[n])
         years = len(d) / 252
+        gross_ex = perf_stats(d["gross"] - d["benchmark"])
         perf[n] = {
             "net_cagr": st["cagr"], "net_sharpe": st["sharpe"], "max_dd": st["max_drawdown"],
+            "gross_excess_ann": gross_ex["cagr"],
             "excess_ann": ex["cagr"], "excess_sharpe": ex["sharpe"],
             "ann_turnover": d["turnover"].sum() / years,
             "ann_cost": d["cost"].sum() / years,
@@ -227,7 +229,8 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
     ic_df.index.name = "signal"
     yearly.index.name = "strategy"
     pct = "{:.1%}"
-    perf_fmt = {"net_cagr": pct, "max_dd": pct, "excess_ann": pct, "ann_turnover": "{:.1f}x",
+    perf_fmt = {"net_cagr": pct, "max_dd": pct, "gross_excess_ann": pct, "excess_ann": pct,
+                "ann_turnover": "{:.1f}x",
                 "ann_cost": pct, "blocked_trades": "{:.0f}", "delisted_exits": "{:.0f}"}
     research_end = (h0 - pd.Timedelta(days=1)).date() if hold_df is not None else idx[-1].date()
     md = [
@@ -260,6 +263,8 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
         "## 2. Backtest (net of costs)",
         "",
         _md_table(perf_df, perf_fmt),
+        "",
+        "`gross_excess_ann` is before costs and `excess_ann` after; the gap is what trading costs take.",
         "",
         "![excess](figures/excess_equity.png)",
         "",
