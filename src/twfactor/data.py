@@ -121,109 +121,223 @@ def make_synthetic(
     return Panel(mk(ret), mk(close), mk(value), mk(np.where(alive, z, np.nan)))
 
 
+
+
 # ---------------------------------------------------------------------------
 # Real data: FinMind
 # ---------------------------------------------------------------------------
+#
+# Why returns need corporate-action data (verified on real rows, see
+# tests/fixtures/README.md):
+#
+#   On ex-dividend, capital-reduction and par-value-change days TWSE does not
+#   compare the close with the previous close; it shows the change as "X0.00"
+#   (不比價). FinMind keeps the 0 and drops the X. So on exactly the days that
+#   matter, neither `close.pct_change()` nor `close - spread` gives the
+#   holder's return. The exchange's *reference price* for that day does:
+#
+#       ret = close / reference * before / prev_close - 1
+#
+#   (before == prev_close in practice; the ratio guards against odd cases.)
 
-def returns_from_spread(close: pd.DataFrame, spread: pd.DataFrame) -> pd.DataFrame:
-    """Daily return relative to the exchange reference price.
+EVENT_COLUMNS = ["date", "stock_id", "before", "reference", "kind"]
 
-    TWSE reports `spread` (漲跌價差) as close minus the *reference* price, and on
-    an ex-dividend day the reference price is already reduced by the dividend.
-    So close / (close - spread) - 1 is the return a holder actually earned
-    (price change + dividend), whereas close.pct_change() would book the
-    dividend as a loss and corrupt momentum/volatility factors.
 
-    VERIFY THIS ON YOUR DATA: compare against a known ex-dividend date (see
-    `audit_ex_dividend_gaps`) before trusting results.
+def events_from_finmind(dividend: pd.DataFrame | None = None,
+                        capital_reduction: pd.DataFrame | None = None,
+                        par_value: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Normalise FinMind corporate-action tables to (date, stock_id, before, reference, kind)."""
+    parts = []
+    spec = [
+        (dividend, "before_price", "reference_price", "dividend"),
+        (capital_reduction, "ClosingPriceonTheLastTradingDay", "PostReductionReferencePrice", "capital_reduction"),
+        (par_value, "before_close", "after_ref_close", "par_value"),
+    ]
+    for df, b, r, kind in spec:
+        if df is None or df.empty:
+            continue
+        x = df[["date", "stock_id", b, r]].rename(columns={b: "before", r: "reference"})
+        x["kind"] = kind
+        parts.append(x)
+    if not parts:
+        return pd.DataFrame(columns=EVENT_COLUMNS)
+    ev = pd.concat(parts, ignore_index=True)
+    ev["date"] = pd.to_datetime(ev["date"])
+    ev["stock_id"] = ev["stock_id"].astype(str)
+    ev = ev[(ev["reference"] > 0) & (ev["before"] > 0)]
+    # Two different events on one day: which reference price already includes
+    # the other is not knowable from these tables, so drop both and let the day
+    # surface as "unresolved" instead of guessing.
+    dup = ev.duplicated(["date", "stock_id"], keep=False)
+    return ev[~dup].reset_index(drop=True)[EVENT_COLUMNS]
+
+
+def build_returns(prices: pd.DataFrame, events: pd.DataFrame | None = None
+                  ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Long FinMind price rows -> (ret, close, value, audit) wide frames.
+
+    prices needs: date, stock_id, close, spread, Trading_Volume, Trading_money.
+
+    audit has one row per day that needed attention:
+      kind = dividend | capital_reduction | par_value   corrected with a reference price
+      kind = unresolved   spread == 0 but close != prev close and no reference
+                          price was found -> return set to NaN (not guessed)
     """
-    ref = close - spread
-    r = close / ref - 1
-    return r.where(ref > 0)
+    px = prices.copy()
+    px["date"] = pd.to_datetime(px["date"])
+    px["stock_id"] = px["stock_id"].astype(str)
+    # Zero-volume rows are suspended / no-trade days: the close is not a traded price.
+    px = px[px["Trading_Volume"] > 0].sort_values(["stock_id", "date"])
+    px["prev_close"] = px.groupby("stock_id")["close"].shift(1)
+    px["ret"] = px["close"] / px["prev_close"] - 1
+
+    ev = events if events is not None else pd.DataFrame(columns=EVENT_COLUMNS)
+    ev = ev.astype({"stock_id": str, "before": float, "reference": float, "kind": object})
+    ev["date"] = pd.to_datetime(ev["date"])
+    px = px.merge(ev, on=["date", "stock_id"], how="left")
+    has_ev = px["reference"].notna() & px["prev_close"].notna()
+    adj = px["close"] / px["reference"] * px["before"] / px["prev_close"] - 1
+    px["ret"] = np.where(has_ev, adj, px["ret"])
+
+    # X-day signature without a matching event: refuse to guess.
+    moved = (px["close"] - px["prev_close"]).abs() > 1e-9
+    unresolved = (px["spread"] == 0) & moved & px["prev_close"].notna() & ~has_ev
+    px.loc[unresolved, "ret"] = np.nan
+    px.loc[unresolved, "kind"] = "unresolved"
+
+    audit = px.loc[has_ev | unresolved, ["date", "stock_id", "kind", "prev_close", "before",
+                                         "reference", "close", "ret"]].copy()
+    audit["naive_pct_change"] = (px.loc[audit.index, "close"] / px.loc[audit.index, "prev_close"] - 1)
+    audit = audit.sort_values(["date", "stock_id"]).reset_index(drop=True)
+
+    wide = lambda col: px.pivot_table(index="date", columns="stock_id", values=col,
+                                      aggfunc="last", dropna=False).sort_index()
+    close = wide("close")
+    ret = wide("ret").reindex_like(close)
+    value = wide("Trading_money").reindex_like(close)
+    ret.columns.name = close.columns.name = value.columns.name = None
+    return ret, close, value, audit
 
 
-def audit_ex_dividend_gaps(close: pd.DataFrame, ret: pd.DataFrame, tol: float = 0.01) -> pd.DataFrame:
-    """List (date, stock) where naive pct_change and reference-price return differ.
+class FinMindError(RuntimeError):
+    pass
 
-    These should be ex-dividend / ex-rights / capital-reduction days. Spot-check
-    a few against public 除權息 records to confirm the spread convention.
+
+class FinMindClient:
+    """Minimal FinMind v4 client with a per-request disk cache.
+
+    The free tier has an hourly request quota. Every successful response is
+    cached as CSV, so when the quota is hit you can simply re-run later and the
+    download resumes. Register for a free token to raise the quota and export
+    it as FINMIND_TOKEN.
     """
-    naive = close.pct_change(fill_method=None)
-    diff = (naive - ret).stack()
-    out = diff[diff.abs() > tol].rename("naive_minus_ref").to_frame()
-    out.index.names = ["date", "stock_id"]
-    return out
+
+    def __init__(self, cache_dir: str | Path = "data/cache", token: str | None = None,
+                 sleep: float = 0.3, verbose: bool = True):
+        self.cache = Path(cache_dir)
+        self.token = token or os.environ.get("FINMIND_TOKEN")
+        self.sleep = sleep
+        self.verbose = verbose
+        self.requests_made = 0
+
+    def get(self, dataset: str, **params) -> pd.DataFrame:
+        key = "_".join(f"{k}={v}" for k, v in sorted(params.items())) or "all"
+        path = self.cache / dataset / f"{key}.csv"
+        if path.exists():
+            return pd.read_csv(path, dtype={"stock_id": str})
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        resp = requests.get(FINMIND_URL, params={"dataset": dataset, **params},
+                            headers=headers, timeout=60)
+        self.requests_made += 1
+        try:
+            payload = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise
+        if payload.get("status") != 200:
+            raise FinMindError(
+                f"{dataset} {params}: HTTP {resp.status_code}, {payload.get('msg')!r}. "
+                "If this is a quota message, wait and re-run; cached data is kept.")
+        df = pd.DataFrame(payload.get("data", []))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=False)
+        time.sleep(self.sleep)
+        return df
 
 
-def _fetch_one(stock_id: str, start: str, end: str, dataset: str, token: str | None) -> pd.DataFrame:
-    params = {"dataset": dataset, "data_id": stock_id, "start_date": start, "end_date": end}
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=30)
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("status") not in (200, None):
-        raise RuntimeError(f"FinMind error for {stock_id}: {payload.get('msg')}")
-    return pd.DataFrame(payload.get("data", []))
+# Industry categories that are not ordinary common stock.
+_EXCLUDED_CATEGORIES = {"ETF", "存託憑證", "創新板股票", "創新版股票", "受益證券", "Index"}
 
 
-def list_stocks(token: str | None = None, markets: tuple[str, ...] = ("twse", "tpex")) -> list[str]:
-    """Common-stock ids (4-digit codes) currently listed on the given markets.
+def stock_universe(client: FinMindClient, start: str) -> pd.DataFrame:
+    """All common stocks that were listed on TWSE/TPEx at any point since `start`.
 
-    NOTE (survivorship bias): this list comes from *today's* listing. Stocks
-    that delisted before today are missing, which flatters backtests. See
-    docs/DESIGN_zh.md for how to fix this.
+    = currently listed (TaiwanStockInfo) + delisted after `start`
+      (TaiwanStockDelisting). Including the delisted ones is what removes
+    survivorship bias: companies that went bust are in the sample.
+
+    Returns columns stock_id, stock_name, status (listed/delisted), delist_date.
     """
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    resp = requests.get(FINMIND_URL, params={"dataset": "TaiwanStockInfo"}, headers=headers, timeout=30)
-    resp.raise_for_status()
-    info = pd.DataFrame(resp.json()["data"])
-    info = info[info["type"].isin(markets)]
-    ids = info["stock_id"].astype(str)
-    return sorted(set(ids[ids.str.fullmatch(r"\d{4}")]))
+    info = client.get("TaiwanStockInfo")
+    info["stock_id"] = info["stock_id"].astype(str)
+    info = info[info["type"].isin(["twse", "tpex"]) & info["stock_id"].str.fullmatch(r"[1-9]\d{3}")]
+    bad = info.groupby("stock_id")["industry_category"].agg(lambda s: bool(set(s) & _EXCLUDED_CATEGORIES))
+    info = info[~info["stock_id"].map(bad)]
+    listed = info.drop_duplicates("stock_id")[["stock_id", "stock_name"]].assign(status="listed", delist_date=pd.NaT)
+
+    dl = client.get("TaiwanStockDelisting")
+    dl["stock_id"] = dl["stock_id"].astype(str)
+    dl["date"] = pd.to_datetime(dl["date"])
+    dl = dl[dl["stock_id"].str.fullmatch(r"[1-9]\d{3}") & (dl["date"] >= pd.Timestamp(start))
+            & ~dl["stock_name"].str.contains("-DR", na=False) & ~dl["stock_id"].str.startswith("91")
+            & ~dl["stock_id"].isin(listed["stock_id"])]  # code later reused by a new listing
+    delisted = dl.sort_values("date").drop_duplicates("stock_id", keep="last")
+    delisted = delisted.rename(columns={"date": "delist_date"})[["stock_id", "stock_name", "delist_date"]]
+    delisted["status"] = "delisted"
+    return pd.concat([listed, delisted], ignore_index=True).sort_values("stock_id").reset_index(drop=True)
 
 
-def load_finmind(
-    stock_ids: list[str],
-    start: str,
-    end: str,
-    cache_dir: str | Path = "data/cache",
-    dataset: str = "TaiwanStockPrice",
-    token: str | None = None,
-    sleep: float = 0.5,
-) -> Panel:
-    """Download (or read from cache) daily prices and build a Panel.
+def load_finmind(stock_ids: list[str], start: str, end: str,
+                 client: FinMindClient | None = None,
+                 with_corporate_actions: bool = True) -> tuple[Panel, pd.DataFrame]:
+    """Download prices (+ corporate actions) and build a Panel.
 
-    `dataset="TaiwanStockPrice"` is free per stock but unadjusted; returns are
-    therefore derived from `spread` (see `returns_from_spread`).
-    The free tier has an hourly request quota; the per-stock cache means you
-    can simply re-run after hitting it and it resumes where it stopped.
+    Requests: 1 price + 1 dividend per stock, 1 bulk par-value call, and a
+    capital-reduction call only for stocks that still have unexplained X-days
+    after dividends are applied. Returns (panel, audit).
     """
-    token = token or os.environ.get("FINMIND_TOKEN")
-    cache = Path(cache_dir) / dataset
-    cache.mkdir(parents=True, exist_ok=True)
-    frames = []
+    client = client or FinMindClient()
+    prices, divs = [], []
     for n, sid in enumerate(stock_ids, 1):
-        f = cache / f"{sid}_{start}_{end}.csv"
-        if f.exists():
-            df = pd.read_csv(f, dtype={"stock_id": str})
-        else:
-            df = _fetch_one(sid, start, end, dataset, token)
-            df.to_csv(f, index=False)
-            time.sleep(sleep)
-        if not df.empty:
-            frames.append(df)
-        if n % 50 == 0:
-            print(f"  loaded {n}/{len(stock_ids)}")
-    if not frames:
-        raise RuntimeError("No data returned")
-    long = pd.concat(frames, ignore_index=True)
-    long["date"] = pd.to_datetime(long["date"])
-    long["stock_id"] = long["stock_id"].astype(str)
-    # Zero-volume rows are suspended/no-trade days; their close is not a traded price.
-    long = long[long["Trading_Volume"] > 0]
+        p = client.get("TaiwanStockPrice", data_id=sid, start_date=start, end_date=end)
+        if not p.empty:
+            prices.append(p)
+            if with_corporate_actions:
+                d = client.get("TaiwanStockDividendResult", data_id=sid, start_date=start, end_date=end)
+                if not d.empty:
+                    divs.append(d)
+        if client.verbose and n % 50 == 0:
+            print(f"  {n}/{len(stock_ids)} stocks ({client.requests_made} new requests)")
+    if not prices:
+        raise FinMindError("No price data returned")
+    prices = pd.concat(prices, ignore_index=True)
 
-    wide = lambda col: long.pivot_table(index="date", columns="stock_id", values=col, aggfunc="last").sort_index()
-    close, spread, value = wide("close"), wide("spread"), wide("Trading_money")
-    spread, value = spread.reindex_like(close), value.reindex_like(close)
-    ret = returns_from_spread(close, spread)
-    return Panel(ret, close, value)
+    if not with_corporate_actions:
+        ret, close, value, audit = build_returns(prices)
+        return Panel(ret, close, value), audit
+
+    par = client.get("TaiwanStockParValueChange", start_date=start)
+    div = pd.concat(divs, ignore_index=True) if divs else None
+    ev = events_from_finmind(div, None, par)
+    _, _, _, audit = build_returns(prices, ev)
+    need = sorted(audit.loc[audit["kind"] == "unresolved", "stock_id"].unique())
+    if need:
+        if client.verbose:
+            print(f"  fetching capital reductions for {len(need)} stocks with unexplained gaps")
+        caps = [client.get("TaiwanStockCapitalReductionReferencePrice", data_id=s, start_date=start)
+                for s in need]
+        caps = [c for c in caps if not c.empty]
+        cap = pd.concat(caps, ignore_index=True) if caps else None
+        ev = events_from_finmind(div, cap, par)
+    ret, close, value, audit = build_returns(prices, ev)
+    return Panel(ret, close, value), audit

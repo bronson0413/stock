@@ -3,7 +3,6 @@ import pandas as pd
 import pytest
 
 from twfactor.analysis import forward_returns, newey_west_tstat
-from twfactor.data import audit_ex_dividend_gaps, returns_from_spread
 from twfactor.metrics import deflated_sharpe, expected_max_sharpe, probabilistic_sharpe
 
 
@@ -27,18 +26,6 @@ def test_newey_west_shrinks_t_for_autocorrelated_series():
     e = rng.normal(size=600)
     x = pd.Series(0.05 + np.convolve(e, np.ones(10) / 10, mode="same"))
     assert abs(newey_west_tstat(x, 10)) < abs(newey_west_tstat(x, 0))
-
-
-def test_ex_dividend_day_is_not_a_loss():
-    idx = pd.bdate_range("2024-07-01", periods=3)
-    # Close 100 -> ex-div of 5 -> reference 95 -> closes at 95 (spread 0).
-    close = pd.DataFrame({"X": [100.0, 95.0, 96.0]}, index=idx)
-    spread = pd.DataFrame({"X": [0.0, 0.0, 1.0]}, index=idx)
-    r = returns_from_spread(close, spread)
-    assert r["X"].iloc[1] == pytest.approx(0.0)
-    assert close.pct_change()["X"].iloc[1] == pytest.approx(-0.05)
-    flagged = audit_ex_dividend_gaps(close, r)
-    assert list(flagged.index.get_level_values("date")) == [idx[1]]
 
 
 def test_more_trials_means_higher_bar():

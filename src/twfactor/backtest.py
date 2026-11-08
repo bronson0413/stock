@@ -13,6 +13,11 @@ Frictions modelled:
 * slippage per side
 * price limits: if a stock closes at limit-up on e you cannot buy it, if it
   closes at limit-down you cannot sell it; suspended (no trade) also blocks.
+  The limit was +/-7% before 2015-06-01 and +/-10% since.
+* delisting: once a stock has printed its last price in the panel, any
+  remaining position is converted to cash at that last price (no further
+  return, no transaction cost). Without this a delisted holding would sit in
+  the book forever as an unsellable zero-return position.
 
 Known simplifications (documented in docs/DESIGN_zh.md): NT$20 minimum fee,
 round lots, market impact beyond fixed slippage, and short-sale constraints
@@ -43,11 +48,24 @@ class Costs:
         return self.commission * self.commission_discount + self.sell_tax + self.slippage
 
 
+LIMIT_CHANGE = pd.Timestamp("2015-06-01")
+
+
+def limit_thresholds(dates: pd.DatetimeIndex, margin: float = 0.005) -> np.ndarray:
+    """Return at or beyond which a close is treated as limit-locked.
+
+    The margin absorbs tick-size rounding of the limit price (the realised
+    limit move is often 9.5-10%, or 6.5-7% before the 2015 change).
+    """
+    return np.where(dates < LIMIT_CHANGE, 0.07 - margin, 0.10 - margin)
+
+
 @dataclass
 class BacktestResult:
     daily: pd.DataFrame                  # gross, net, cost, turnover, benchmark
     weights: dict = field(default_factory=dict)  # exec date -> pd.Series of weights
     blocked: int = 0                     # number of trades blocked by limits/suspension
+    delisted_exits: int = 0              # positions converted to cash after a last print
 
     @property
     def excess(self) -> pd.Series:
@@ -73,13 +91,22 @@ def target_weights(signal_row: pd.Series, eligible: pd.Series, top_frac: float,
 def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
                  rebal_dates: pd.DatetimeIndex, top_frac: float = 0.2,
                  mode: str = "long_only", costs: Costs = Costs(),
-                 limit_threshold: float = 0.095) -> BacktestResult:
+                 limit_threshold: float | None = None) -> BacktestResult:
+    """limit_threshold=None uses the historical TW limits (see limit_thresholds)."""
     ret_raw = panel.ret
     dates = ret_raw.index
     cols = ret_raw.columns
     R = ret_raw.to_numpy()
     R0 = np.nan_to_num(R)  # held stock with no print: assume flat that day
     M = mask.to_numpy()
+    lim = (limit_thresholds(dates) if limit_threshold is None
+           else np.full(len(dates), limit_threshold))
+
+    # Index of each stock's last print; stocks that stop before the panel ends
+    # are treated as delisted from the next day on.
+    has = ~np.isnan(R)
+    last = np.where(has.any(0), len(dates) - 1 - np.argmax(has[::-1], axis=0), -1)
+    gone_after = np.where(last < len(dates) - 1, last, len(dates))
 
     # Map each signal date to its execution date (next trading day).
     pos = dates.get_indexer(rebal_dates)
@@ -95,13 +122,17 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
 
     w = np.zeros(len(cols))
     gross, net, cost_s, turn_s = (np.zeros(len(dates)) for _ in range(4))
-    weights, blocked_count = {}, 0
+    weights, blocked_count, exits = {}, 0, 0
 
     for t in range(len(dates)):
         r = R0[t]
         port = float(w @ r)
         nav = 1.0 + port
         w = w * (1 + r) / nav if nav > 0 else w * 0  # drift with prices
+        dead = (gone_after < t) & (w != 0)
+        if dead.any():
+            exits += int(dead.sum())
+            w = np.where(dead, 0.0, w)
         cost = turnover = 0.0
 
         if t in exec_plan:
@@ -110,8 +141,8 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
             trade = tgt - w
             raw = R[t]
             no_print = np.isnan(raw)
-            cant_buy = (trade > 1e-12) & (no_print | (raw >= limit_threshold))
-            cant_sell = (trade < -1e-12) & (no_print | (raw <= -limit_threshold))
+            cant_buy = (trade > 1e-12) & (no_print | (raw >= lim[t]))
+            cant_sell = (trade < -1e-12) & (no_print | (raw <= -lim[t]))
             blocked = cant_buy | cant_sell
             blocked_count += int(blocked.sum())
             tgt = np.where(blocked, w, tgt)
@@ -136,4 +167,4 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
     daily = pd.DataFrame({"gross": gross, "net": net, "cost": cost_s,
                           "turnover": turn_s, "benchmark": bench}, index=dates)
     first = min(exec_plan) if exec_plan else 0
-    return BacktestResult(daily.iloc[first:], weights, blocked_count)
+    return BacktestResult(daily.iloc[first:], weights, blocked_count, exits)

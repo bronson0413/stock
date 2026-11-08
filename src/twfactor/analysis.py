@@ -23,8 +23,12 @@ def forward_returns(ret: pd.DataFrame, horizon: int, lag: int = 1) -> pd.DataFra
     trade is done at the close of t+1, so the first return the position earns
     is day t+2. Measuring IC from t+1 instead would credit the factor with a
     day of return it could never have captured.
+
+    Days without a print (suspension, delisting) count as 0 return, matching
+    how the backtest values a held position. Dropping such stocks instead
+    would quietly remove exactly the names that got into trouble.
     """
-    lr = np.log1p(ret)
+    lr = np.log1p(ret).fillna(0.0)
     s = lr.rolling(horizon, min_periods=horizon).sum().shift(-(horizon + lag))
     return np.expm1(s)
 

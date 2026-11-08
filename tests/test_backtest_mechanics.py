@@ -70,3 +70,33 @@ def test_suspended_stock_cannot_be_bought():
     scores["A"] = 5.0
     res = _run(p, scores, top_frac=0.05)
     assert res.blocked == 1
+
+
+def test_delisted_holding_is_converted_to_cash():
+    # A is bought, then stops printing (delisted). Its weight must leave the
+    # book instead of sitting there unsellable until the end.
+    p = _panel_with_padding({"A": [0, 0, 0.02, np.nan, np.nan, np.nan]})
+    scores = {c: -1.0 for c in p.ret.columns}
+    scores["A"] = 5.0
+    res = _run(p, scores, top_frac=0.05)
+    assert res.delisted_exits == 1
+    assert res.daily["gross"].iloc[1] == pytest.approx(0.02)
+
+
+def test_limit_threshold_follows_2015_rule_change():
+    from twfactor.backtest import limit_thresholds
+    th = limit_thresholds(pd.DatetimeIndex(["2015-05-29", "2015-06-01"]))
+    assert th[0] == pytest.approx(0.065)
+    assert th[1] == pytest.approx(0.095)
+
+
+def test_eight_percent_close_was_limit_up_before_2015():
+    # +8% on the execution day: limit-locked under the old 7% rule, tradable under 10%.
+    for start, blocked in [("2014-03-03", 1), ("2016-03-01", 0)]:
+        idx = pd.bdate_range(start, periods=4)
+        rets = {"A": [0, 0.08, 0.01, 0.0], **{f"P{i:02d}": [0.0] * 4 for i in range(18)}}
+        ret = pd.DataFrame(rets, index=idx)
+        panel = Panel(ret, (1 + ret).cumprod() * 100, pd.DataFrame(1e9, index=idx, columns=ret.columns))
+        scores = {c: -1.0 for c in ret.columns}
+        scores["A"] = 5.0
+        assert _run(panel, scores, top_frac=0.05).blocked == blocked
