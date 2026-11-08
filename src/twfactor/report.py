@@ -165,6 +165,10 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
         ic = A.rank_ic(sig, fwd, mask, res_dates)
         ic_series[name] = ic
         ic_rows[name] = A.ic_summary(ic)
+        # Coverage: how many investable stocks actually have this signal on a
+        # rebalance date. Fundamentals start at different dates per stock.
+        ic_rows[name]["median_names"] = float(
+            (sig.reindex(res_dates).notna() & mask.loc[res_dates]).sum(axis=1).median())
         q = A.quantile_returns(sig, fwd, mask, res_dates)
         quant[name] = q.mean() * (252 / horizon)
         # Mean-based check. Rank IC follows medians, and the median of a
@@ -255,10 +259,12 @@ def run_study(panel, out_dir: str | Path, universe_kwargs: dict | None = None,
         "",
         f"## 1. Predictive power (rank IC, {horizon}-day forward, monthly samples)",
         "",
-        _md_table(ic_df, {"hit_rate": pct, "n_periods": "{:.0f}", "q5_q1_ann": pct}),
+        _md_table(ic_df, {"hit_rate": pct, "n_periods": "{:.0f}", "q5_q1_ann": pct,
+                          "median_names": "{:.0f}"}),
         "",
         "`q5_q1_*` = mean forward return of the top minus the bottom quintile. When rank IC is "
-        "significant but this is not, the 'effect' is likely volatility drag on medians, not returns.",
+        "significant but this is not, the 'effect' is likely volatility drag on medians, not returns. "
+        "`median_names` = investable stocks with a value for the signal on a typical rebalance date.",
         "",
         "## 2. Backtest (net of costs)",
         "",
