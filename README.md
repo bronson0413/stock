@@ -16,6 +16,7 @@ separates a real effect from a backtest artefact. Every row below is enforced by
 | **Corporate actions** | On ex-dividend, capital-reduction and par-value-change days TWSE prints the change as `X0.00` and FinMind stores `spread = 0`. Returns use the exchange **reference price** instead; unexplained gaps become NaN, not guesses | `test_corporate_actions.py` on real rows (see below) |
 | Survivorship bias | Universe = listed stocks **plus every stock delisted since the start date** (`TaiwanStockDelisting`); delisted holdings exit at their last price | `test_finmind_loader.py`, `test_backtest_mechanics.py` |
 | Taiwan frictions | 0.1425% commission, **0.3% sell tax**, slippage; **price limits** (±7% before 2015-06-01, ±10% after): no buying at limit-up, no selling at limit-down or when suspended | `test_backtest_mechanics.py` |
+| Fundamentals used before they were public | Monthly revenue is dated the 1st of the next month by FinMind but may be published as late as the 10th; it is used from the 11th. Valuation ratios are used on the day the exchange publishes them | `test_fundamentals.py` |
 | Sector bets disguised as factors | `--industry-neutral` ranks stocks within their industry (Taiwan is dominated by electronics; a raw factor can be a sector bet) | `test_neutralize_removes_pure_industry_bets` |
 | Rank IC ≠ returns | Rank IC follows medians, which fall with volatility, so it can "find" a low-vol effect in zero-mean data. The report adds the top-minus-bottom quintile **mean** spread next to it | `test_rank_ic_volatility_drag_is_caught_by_mean_spread` |
 | Data mining | **Deflated Sharpe Ratio** (Bailey & López de Prado) over all strategies in the run | `test_analysis_and_metrics.py` |
@@ -45,15 +46,17 @@ twfactor synthetic --out reports/synthetic --holdout-start 2023-01-01
 
 # 2) Real TWSE/TPEx data via the free FinMind API (cached and resumable)
 #    PowerShell:  $env:FINMIND_TOKEN="..."      bash:  export FINMIND_TOKEN=...
-twfactor finmind --start 2016-01-01 --end 2025-12-31 --sample 300 --holdout-start 2023-01-01 --out reports/tw300
+twfactor finmind --start 2013-01-01 --end 2026-10-31 --sample 500 --holdout-start 2023-01-01 --out reports/tw500
+#    Windows one-click (sample, then full market, plain and industry-neutral):  scripts\run_tw.bat
 
 # 3) Inspect every corporate-action correction for some stocks
 twfactor audit --start 2017-01-01 --end 2025-12-31 --stocks 2412 2327
 ```
 
 FinMind's free tier allows 300 requests/hour (600 with a free registered token). A run needs
-about two requests per stock, so `--sample 300` takes roughly an hour with a token and the full
-market (~2,000 stocks incl. delisted) several hours. The client caches every response, sleeps
+one price request per stock plus dividend, valuation and revenue requests for the stocks that
+were ever liquid enough to trade, so a 500-stock sample takes a few hours with a token and the
+full market (~2,200 stocks incl. delisted) is an overnight job. The client caches every response, sleeps
 through HTTP 402 quota responses, and never retries other 4xx errors (FinMind temporarily bans
 IPs that send many of them). Interrupt and re-run at any time; it resumes from cache.
 
@@ -68,7 +71,10 @@ backtest with DSR, excess return by year, quintile bars, IC decay, factor correl
 src/twfactor/
   data.py       Panel; synthetic market; FinMind client, universe incl. delisted, corporate-action returns
   universe.py   point-in-time investable filter (history, liquidity, price)
-  factors.py    12-1 momentum, 1M reversal, low volatility, Amihud illiquidity, MAX (lottery); industry neutralisation
+  fundamentals.py  valuation ratios and monthly revenue aligned to their publication dates
+  factors.py    price/volume: 12-1 momentum, 1M reversal, low volatility, Amihud illiquidity, MAX
+                fundamental: book-to-price, earnings yield, dividend yield, revenue growth, revenue vs 12m high
+                composite, industry neutralisation
   analysis.py   forward returns, rank IC, Newey–West t, IC decay, quintiles, factor correlation
   backtest.py   daily-drift portfolio accounting, TW costs, historical price limits, delisting exits
   ml.py         walk-forward, purged LightGBM / ridge factor combination
@@ -77,8 +83,9 @@ src/twfactor/
 tests/          unit, look-ahead, holdout and real-data fixture tests
 ```
 
-The five factors are standard price/volume anomalies chosen because they need only free daily
-data, not because they are expected to work in Taiwan. Whether they do is what the tool is for.
+The ten factors are standard anomalies that need only free data, chosen as hypotheses, not
+because they are expected to work in Taiwan. Whether they do is what the tool is for.
+Fundamental factors are skipped automatically when the data is absent (e.g. the synthetic run).
 
 ## What the synthetic run shows
 
