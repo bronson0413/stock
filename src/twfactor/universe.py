@@ -26,7 +26,8 @@ def investable(
     min_price      excludes very low-priced stocks (often distressed / 全額交割).
     """
     has_hist = panel.ret.notna().cumsum() >= min_history
-    liquid = panel.value.rolling(value_window, min_periods=value_window).mean() >= min_avg_value
+    # min_periods < window: one suspended day should not exclude a stock for a month.
+    liquid = panel.value.rolling(value_window, min_periods=value_window * 3 // 4).mean() >= min_avg_value
     priced = panel.close >= min_price
     traded_today = panel.ret.notna()
     return has_hist & liquid & priced & traded_today

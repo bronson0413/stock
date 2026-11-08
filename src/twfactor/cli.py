@@ -22,7 +22,7 @@ def _pick_stocks(client: FinMindClient, start: str, stocks, sample: int | None, 
         return list(stocks)
     uni = stock_universe(client, start)
     out.mkdir(parents=True, exist_ok=True)
-    uni.to_csv(out / "universe.csv", index=False)
+    uni.to_csv(out / "universe.csv", index=False, encoding="utf-8-sig")  # BOM so Excel shows 中文
     n_del = int((uni["status"] == "delisted").sum())
     print(f"Universe: {len(uni)} common stocks ({n_del} delisted since {start} -- kept to avoid survivorship bias)")
     ids = uni["stock_id"].tolist()
@@ -100,7 +100,7 @@ def _run(args) -> None:
         print(f"Loading {len(ids)} stocks (cached under {args.cache}; re-run to resume after a quota stop)...")
         panel, audit = load_finmind(ids, args.start, args.end, client)
         out.mkdir(parents=True, exist_ok=True)
-        audit.to_csv(out / "corporate_actions_audit.csv", index=False)
+        audit.to_csv(out / "corporate_actions_audit.csv", index=False, encoding="utf-8-sig")
         n_unres = int((audit["kind"] == "unresolved").sum()) if not audit.empty else 0
         n_fix = len(audit) - n_unres
         print(f"Corporate-action days corrected: {n_fix}; unresolved (set to NaN): {n_unres}")
@@ -115,7 +115,7 @@ def _run(args) -> None:
         uni_file = out / "universe.csv"
         if uni_file.exists() and not args.stocks:
             import pandas as pd
-            uni = pd.read_csv(uni_file, dtype={"stock_id": str})
+            uni = pd.read_csv(uni_file, dtype={"stock_id": str}, encoding="utf-8-sig")
             n_del = int(uni[uni["stock_id"].isin(loaded)]["status"].eq("delisted").sum())
             notes.append(f"Survivorship: {n_del} of the loaded stocks were delisted during the period and are included")
         res = run_study(panel, out, universe_kwargs={"min_avg_value": args.min_avg_value},
