@@ -102,7 +102,32 @@ def test_universe_keeps_delisted_and_drops_non_common(client):
 def test_api_error_message_is_surfaced(tmp_path, monkeypatch):
     monkeypatch.setattr(D.requests, "get", lambda *a, **k: FakeResp(
         {"status": 402, "msg": "Requests reach the upper limit."}, status=402))
-    c = D.FinMindClient(tmp_path, sleep=0, verbose=False)
+    c = D.FinMindClient(tmp_path, sleep=0, verbose=False, wait_on_quota=False)
     with pytest.raises(D.FinMindError, match="upper limit"):
         c.get("TaiwanStockPrice", data_id="2330", start_date="2024-01-01", end_date="2024-02-01")
     assert not any(tmp_path.rglob("*.csv"))  # failures are not cached
+
+
+def test_quota_402_waits_then_resumes(tmp_path, monkeypatch):
+    replies = iter([({"status": 402, "msg": "upper limit"}, 402),
+                    ({"status": 200, "msg": "success", "data": [{"date": "2024-01-02", "stock_id": "2330"}]}, 200)])
+    monkeypatch.setattr(D.requests, "get", lambda *a, **k: FakeResp(*next(replies)))
+    slept = []
+    monkeypatch.setattr(D.time, "sleep", slept.append)
+    c = D.FinMindClient(tmp_path, sleep=0, verbose=False)
+    df = c.get("TaiwanStockPrice", data_id="2330", start_date="2024-01-01", end_date="2024-01-05")
+    assert len(df) == 1 and slept[0] == D.FinMindClient.QUOTA_WAIT_S
+
+
+def test_other_4xx_is_not_retried(tmp_path, monkeypatch):
+    calls = []
+
+    def bad(*a, **k):
+        calls.append(1)
+        return FakeResp({"status": 400, "msg": "Your level is free."}, status=400)
+
+    monkeypatch.setattr(D.requests, "get", bad)
+    c = D.FinMindClient(tmp_path, sleep=0, verbose=False)
+    with pytest.raises(D.FinMindError):
+        c.get("TaiwanStockDividendResult", start_date="2024-01-01")
+    assert len(calls) == 1

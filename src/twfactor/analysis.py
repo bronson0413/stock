@@ -85,11 +85,21 @@ def ic_summary(ic: pd.Series, periods_per_year: int = 12, nw_lags: int = 2) -> d
 
 
 def ic_decay(factor: pd.DataFrame, ret: pd.DataFrame, mask: pd.DataFrame,
-             dates: pd.DatetimeIndex, horizons=(1, 5, 21, 63, 126)) -> pd.DataFrame:
-    """Mean IC by forward horizon: tells you how often you need to rebalance."""
+             dates: pd.DatetimeIndex, horizons=(1, 5, 21, 63, 126),
+             cutoff: pd.Timestamp | None = None, lag: int = 1) -> pd.DataFrame:
+    """Mean IC by forward horizon: tells you how often you need to rebalance.
+
+    cutoff: drop, separately for each horizon, dates whose forward window
+    would reach cutoff or later (used to keep a holdout period unseen).
+    """
+    idx = ret.index
     rows = []
     for h in horizons:
-        ic = rank_ic(factor, forward_returns(ret, h), mask, dates)
+        ds = dates
+        if cutoff is not None:
+            cut = idx.searchsorted(cutoff)
+            ds = pd.DatetimeIndex([d for d in dates if idx.get_loc(d) + lag + h < cut])
+        ic = rank_ic(factor, forward_returns(ret, h, lag), mask, ds)
         lags = max(2, math.ceil(h / 21))
         rows.append({"horizon_days": h, "ic_mean": ic.mean(), "t_stat_nw": newey_west_tstat(ic, lags)})
     return pd.DataFrame(rows).set_index("horizon_days")

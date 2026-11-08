@@ -121,7 +121,7 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
         bench = np.where(elig_prev, R0, 0).sum(1) / np.maximum(elig_prev.sum(1), 1)
 
     w = np.zeros(len(cols))
-    gross, net, cost_s, turn_s = (np.zeros(len(dates)) for _ in range(4))
+    gross, net, cost_s, turn_s, blk_s, exit_s = (np.zeros(len(dates)) for _ in range(6))
     weights, blocked_count, exits = {}, 0, 0
 
     for t in range(len(dates)):
@@ -132,6 +132,7 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
         dead = (gone_after < t) & (w != 0)
         if dead.any():
             exits += int(dead.sum())
+            exit_s[t] = dead.sum()
             w = np.where(dead, 0.0, w)
         cost = turnover = 0.0
 
@@ -145,6 +146,7 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
             cant_sell = (trade < -1e-12) & (no_print | (raw <= -lim[t]))
             blocked = cant_buy | cant_sell
             blocked_count += int(blocked.sum())
+            blk_s[t] = blocked.sum()
             tgt = np.where(blocked, w, tgt)
             if mode == "long_only":
                 long_total = tgt[tgt > 0].sum()
@@ -164,7 +166,7 @@ def run_backtest(panel, signal: pd.DataFrame, mask: pd.DataFrame,
         net[t] = (1 + port) * (1 - cost) - 1
         cost_s[t], turn_s[t] = cost, turnover
 
-    daily = pd.DataFrame({"gross": gross, "net": net, "cost": cost_s,
-                          "turnover": turn_s, "benchmark": bench}, index=dates)
+    daily = pd.DataFrame({"gross": gross, "net": net, "cost": cost_s, "turnover": turn_s,
+                          "benchmark": bench, "blocked": blk_s, "delisted_exits": exit_s}, index=dates)
     first = min(exec_plan) if exec_plan else 0
     return BacktestResult(daily.iloc[first:], weights, blocked_count, exits)

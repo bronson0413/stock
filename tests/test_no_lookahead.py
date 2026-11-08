@@ -78,3 +78,24 @@ def test_ml_purging_prevents_label_leakage(panel, mask):
     leak = walk_forward_signal(panel, raw, mask, upto, purge=False, **kw).loc[d]
     leak_bad = walk_forward_signal(bad, raw_bad, bad_mask, upto, purge=False, **kw).loc[d]
     assert not np.allclose(leak.dropna(), leak_bad.dropna())
+
+
+def test_holdout_data_cannot_influence_research_tables(panel, tmp_path):
+    """Scramble everything from the holdout start on: every research-window
+    table in the report must be bit-for-bit identical."""
+    from twfactor.report import run_study
+
+    h0 = "2021-06-01"
+    cutoff = panel.ret.index[panel.ret.index.searchsorted(pd.Timestamp(h0)) - 1]
+    bad = _corrupt_after(panel, cutoff)
+    sig = panel.true_signal.copy()
+    after = sig.index > cutoff
+    sig.loc[after] = np.random.default_rng(5).standard_normal((after.sum(), sig.shape[1]))
+    bad = Panel(bad.ret, bad.close, bad.value, sig.where(panel.true_signal.notna()))
+    kw = dict(include_ml=True, holdout_start=h0)
+    a = run_study(panel, tmp_path / "a", **kw)
+    b = run_study(bad, tmp_path / "b", **kw)
+    pd.testing.assert_frame_equal(a["ic"], b["ic"])
+    pd.testing.assert_frame_equal(a["perf"], b["perf"])
+    pd.testing.assert_frame_equal(a["decay"], b["decay"])
+    assert not a["holdout"].equals(b["holdout"])  # the holdout itself does change

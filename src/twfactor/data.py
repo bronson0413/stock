@@ -66,6 +66,7 @@ def make_synthetic(
     alpha_per_sd: float = 0.0004,
     signal_persistence: float = 0.995,
     seed: int = 0,
+    start: str = "2018-01-02",
 ) -> Panel:
     """Simulate a market where `true_signal` predicts next-day returns.
 
@@ -82,7 +83,7 @@ def make_synthetic(
     * stocks have very different liquidity.
     """
     rng = np.random.default_rng(seed)
-    dates = pd.bdate_range("2018-01-02", periods=n_days)
+    dates = pd.bdate_range(start, periods=n_days)
     ids = [f"S{i:04d}" for i in range(n_stocks)]
 
     beta = rng.uniform(0.6, 1.4, n_stocks)
@@ -232,19 +233,24 @@ class FinMindClient:
     it as FINMIND_TOKEN.
     """
 
+    # FinMind policy (finmind.github.io, checked 2026-11): free 300 req/h,
+    # registered 600 req/h; over quota -> HTTP 402; many 4xx in a short time
+    # -> temporary IP ban (403). So: wait on 402, back off on 5xx, and stop
+    # immediately on any other error instead of retrying it.
+    QUOTA_WAIT_S = 15 * 60
+    MAX_QUOTA_WAITS = 12
+    MAX_5XX_RETRIES = 3
+
     def __init__(self, cache_dir: str | Path = "data/cache", token: str | None = None,
-                 sleep: float = 0.3, verbose: bool = True):
+                 sleep: float = 0.3, verbose: bool = True, wait_on_quota: bool = True):
         self.cache = Path(cache_dir)
         self.token = token or os.environ.get("FINMIND_TOKEN")
         self.sleep = sleep
         self.verbose = verbose
+        self.wait_on_quota = wait_on_quota
         self.requests_made = 0
 
-    def get(self, dataset: str, **params) -> pd.DataFrame:
-        key = "_".join(f"{k}={v}" for k, v in sorted(params.items())) or "all"
-        path = self.cache / dataset / f"{key}.csv"
-        if path.exists():
-            return pd.read_csv(path, dtype={"stock_id": str})
+    def _request(self, dataset: str, params: dict) -> tuple[int, dict]:
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         resp = requests.get(FINMIND_URL, params={"dataset": dataset, **params},
                             headers=headers, timeout=60)
@@ -252,12 +258,35 @@ class FinMindClient:
         try:
             payload = resp.json()
         except ValueError:
-            resp.raise_for_status()
-            raise
-        if payload.get("status") != 200:
+            payload = {"status": resp.status_code, "msg": "non-JSON response"}
+        return resp.status_code, payload
+
+    def get(self, dataset: str, **params) -> pd.DataFrame:
+        key = "_".join(f"{k}={v}" for k, v in sorted(params.items())) or "all"
+        path = self.cache / dataset / f"{key}.csv"
+        if path.exists():
+            return pd.read_csv(path, dtype={"stock_id": str})
+
+        quota_waits = server_retries = 0
+        while True:
+            http, payload = self._request(dataset, params)
+            status = payload.get("status", http)
+            if status == 200:
+                break
+            if status == 402 and self.wait_on_quota and quota_waits < self.MAX_QUOTA_WAITS:
+                quota_waits += 1
+                if self.verbose:
+                    print(f"  quota reached after {self.requests_made} requests; "
+                          f"waiting {self.QUOTA_WAIT_S // 60} min ({quota_waits}/{self.MAX_QUOTA_WAITS})")
+                time.sleep(self.QUOTA_WAIT_S)
+                continue
+            if http >= 500 and server_retries < self.MAX_5XX_RETRIES:
+                server_retries += 1
+                time.sleep(2 ** server_retries)
+                continue
             raise FinMindError(
-                f"{dataset} {params}: HTTP {resp.status_code}, {payload.get('msg')!r}. "
-                "If this is a quota message, wait and re-run; cached data is kept.")
+                f"{dataset} {params}: HTTP {http}, {payload.get('msg')!r}. "
+                "Not retried (repeated 4xx can get the IP banned). Cached data is kept; re-run to resume.")
         df = pd.DataFrame(payload.get("data", []))
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=False)
